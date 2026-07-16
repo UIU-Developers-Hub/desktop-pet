@@ -18,10 +18,12 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateTimeEdit,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -64,6 +66,81 @@ SYSTEM_PROMPT = (
 )
 
 
+class TaskDetailWindow(QDialog):
+    def __init__(self, task: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Task Details: {task.get('title', 'Untitled')}")
+        self.setMinimumSize(450, 350)
+        self.setWindowFlags(Qt.WindowType.Window)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+        
+        title_label = QLabel(f"<b>Title:</b> {html.escape(task.get('title', 'Untitled'))}")
+        title_label.setWordWrap(True)
+        title_label.setStyleSheet("font-size: 16px;")
+        layout.addWidget(title_label)
+        
+        priority = str(task.get("priority") or "normal").capitalize()
+        priority_label = QLabel(f"<b>Priority:</b> {priority}")
+        if priority.lower() == "high":
+            priority_label.setStyleSheet("color: #50d890;")
+        layout.addWidget(priority_label)
+        
+        due_at = task.get("due_at")
+        if due_at:
+            try:
+                dt = datetime.fromisoformat(str(due_at).replace("Z", "+00:00")).astimezone()
+                due_str = dt.strftime("%a, %b %d, %Y %I:%M %p")
+            except ValueError:
+                due_str = str(due_at)
+            layout.addWidget(QLabel(f"<b>Due:</b> {due_str}"))
+        else:
+            layout.addWidget(QLabel("<b>Due:</b> None"))
+            
+        layout.addWidget(QLabel("<b>Notes:</b>"))
+        self.notes_edit = QTextBrowser(self)
+        self.notes_edit.setOpenExternalLinks(True)
+        notes = task.get("notes", "")
+        if notes:
+            self.notes_edit.setPlainText(notes)
+        else:
+            self.notes_edit.setPlainText("No notes provided.")
+        layout.addWidget(self.notes_edit, 1)
+        
+        close_btn = QPushButton("Close", self)
+        close_btn.setFixedSize(100, 36)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        
+        self.setStyleSheet("""
+            QDialog {
+                background: #1a1b23;
+                color: #e0e0e4;
+                font-family: "Segoe UI Variable", "Inter", "Segoe UI", sans-serif;
+                font-size: 14px;
+            }
+            QLabel { color: #e0e0e4; background: transparent; }
+            QTextBrowser {
+                background: #141519;
+                border: 1px solid #25262f;
+                border-radius: 10px;
+                padding: 10px;
+                color: #e0e0e4;
+            }
+            QPushButton {
+                background: #50d890;
+                color: #0f1a14;
+                border: 0;
+                border-radius: 10px;
+                padding: 8px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background: #62e49f; }
+        """)
+
+
 class TaskItemWidget(QWidget):
     """One row in the open-task or archive list."""
 
@@ -99,6 +176,13 @@ class TaskItemWidget(QWidget):
         self.btn_layout = QHBoxLayout(self.btn_widget)
         self.btn_layout.setContentsMargins(0, 0, 0, 0)
         self.btn_layout.setSpacing(6)
+        
+        self.btn_details = QPushButton("ℹ", self.btn_widget)
+        self.btn_details.setObjectName("actionBtnDetails")
+        self.btn_details.setFixedSize(32, 32)
+        self.btn_details.setToolTip("View Details")
+        self.btn_details.clicked.connect(self._on_view_details)
+        self.btn_layout.addWidget(self.btn_details)
         
         if not is_archive:
             self.btn_done = QPushButton("✓", self.btn_widget)
@@ -141,6 +225,10 @@ class TaskItemWidget(QWidget):
     def leaveEvent(self, event):
         self.btn_widget.setVisible(False)
         super().leaveEvent(event)
+        
+    def _on_view_details(self):
+        dialog = TaskDetailWindow(self.task, self.parent_bubble)
+        dialog.show()
         
     def _on_done(self):
         self.parent_bubble.todo_store.mark_done(int(self.task["id"]))
@@ -393,6 +481,7 @@ class ChatBubble(QWidget):
         # --- Task list ---
         self.task_list = QListWidget(tab)
         self.task_list.setAlternatingRowColors(False)
+        self.task_list.setResizeMode(QListView.ResizeMode.Adjust)
         layout.addWidget(self.task_list, 1)
 
         return tab
@@ -406,6 +495,7 @@ class ChatBubble(QWidget):
         # --- Archive list ---
         self.archive_list = QListWidget(tab)
         self.archive_list.setAlternatingRowColors(False)
+        self.archive_list.setResizeMode(QListView.ResizeMode.Adjust)
         layout.addWidget(self.archive_list, 1)
 
         return tab
@@ -513,6 +603,17 @@ class ChatBubble(QWidget):
                 padding: 0px;
             }
             QPushButton#actionBtnDone:hover, QPushButton#actionBtnRestore:hover {
+                background: #33344a;
+            }
+            QPushButton#actionBtnDetails {
+                background: #282938;
+                color: #4da6ff;
+                border: 1px solid #33343f;
+                border-radius: 6px;
+                font-size: 14px;
+                padding: 0px;
+            }
+            QPushButton#actionBtnDetails:hover {
                 background: #33344a;
             }
             QPushButton#actionBtnDelete {
@@ -826,8 +927,17 @@ class ChatBubble(QWidget):
         title = task.get("title", "Untitled")
         priority = str(task.get("priority") or "normal").upper()
         due = self._format_due(task)
-        notes = f"\n   {task['notes']}" if task.get("notes") else ""
-        return f"#{task['id']}  [{priority}] {title}\n   {due}{notes}"
+        
+        notes = task.get("notes")
+        if notes:
+            notes_preview = notes.replace("\n", " ").strip()
+            if len(notes_preview) > 60:
+                notes_preview = notes_preview[:57] + "..."
+            notes_str = f"\n   {notes_preview}"
+        else:
+            notes_str = ""
+            
+        return f"#{task['id']}  [{priority}] {title}\n   {due}{notes_str}"
 
     def _format_due(self, task: dict) -> str:
         due_at = self._parse_due_at(task)
