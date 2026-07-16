@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 
 
 class SettingsDialog(QDialog):
-    """Modal editor for persisted LLM provider settings."""
+    """Modal editor for persisted LLM provider and voice settings."""
 
     def __init__(self, llm_client: OllamaClient, parent=None):
         super().__init__(parent)
@@ -60,6 +60,7 @@ class SettingsDialog(QDialog):
 
         root.addWidget(self._build_local_group())
         root.addWidget(self._build_cloud_group())
+        root.addWidget(self._build_voice_group())
 
         self.status_label = QLabel("", self)
         self.status_label.setObjectName("statusLabel")
@@ -131,6 +132,10 @@ class SettingsDialog(QDialog):
             QLabel#statusLabel {
                 color: #9ba1a6;
             }
+            QLabel#voiceHelp {
+                color: #9ba1a6;
+                font-size: 12px;
+            }
             QCheckBox {
                 spacing: 8px;
             }
@@ -191,9 +196,24 @@ class SettingsDialog(QDialog):
         layout.addRow("Model", model_row)
         return group
 
+    def _build_voice_group(self) -> QGroupBox:
+        group = QGroupBox("Voice", self)
+        layout = QFormLayout(group)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.voice_enabled_box = QCheckBox("Speak pet replies using Microsoft voice", group)
+        layout.addRow("", self.voice_enabled_box)
+
+        help_label = QLabel("Uses the default Windows voice through Microsoft SAPI.", group)
+        help_label.setObjectName("voiceHelp")
+        help_label.setWordWrap(True)
+        layout.addRow("", help_label)
+        return group
+
     def _load_values(self) -> None:
         self._set_combo_data(self.provider_box, normalize_provider(self.settings.chat_provider))
         self.cloud_fallback_box.setChecked(self.settings.cloud_fallback_enabled)
+        self.voice_enabled_box.setChecked(self.settings.voice_enabled)
         self.timeout_box.setValue(self.settings.timeout_seconds)
         self.local_url_input.setText(self.settings.local_base_url)
         self.cloud_url_input.setText(self.settings.cloud_base_url)
@@ -238,6 +258,7 @@ class SettingsDialog(QDialog):
             chat_provider=self.provider_box.currentData(),
             cloud_fallback_enabled=self.cloud_fallback_box.isChecked(),
             timeout_seconds=self.timeout_box.value(),
+            voice_enabled=self.voice_enabled_box.isChecked(),
         ).normalized()
 
     def _set_model_box(self, box: QComboBox, models: list[str], current: str) -> None:

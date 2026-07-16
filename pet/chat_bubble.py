@@ -38,6 +38,7 @@ from data.settings_store import normalize_provider
 from data.todo_store import TodoStore, normalize_priority
 from pet.device_monitor import DeviceMonitor, DeviceSnapshot
 from pet.settings_dialog import SettingsDialog
+from pet.voice import MicrosoftVoice
 from pet.window_tracker import WindowTracker
 
 
@@ -47,12 +48,19 @@ SYSTEM_PROMPT = (
     "If the user asks to add a todo, reminder, task, or plan item, end with exactly "
     'TODO_JSON: {"title":"...","due_at":"YYYY-MM-DDTHH:MM:SS","priority":"high|normal|low","notes":"..."} '
     "Use null for due_at and an empty string for notes when either does not apply. "
+    "Create TODO_JSON only for explicit future tracking requests; do not create todos for casual mentions "
+    "of sleep, rest, or already-completed work. "
+    "If the user says a todo is finished, done, fixed, completed, no longer needed, or should stop being mentioned, "
+    "end with exactly "
+    'DONE_JSON: {"task_id":123,"title":"...","all_related":true} '
+    "Use null for task_id when the user names the task instead of an id. "
     "To preserve context efficiently, optionally end with exactly "
     'MEMORY_JSON: {"memories":[{"kind":"preference|project|work_style|profile|instruction|context","summary":"...","confidence":0.7}],"rollup":"..."} '
     "Use MEMORY_JSON only for durable preferences, project plans, working style, recurring needs, "
     "or important ongoing context. Keep memories under 180 characters and the rollup under 700 characters. "
+    "Never save a completed todo as an active memory. Treat completed or archived todos as historical only. "
     "Do not store secrets, API keys, passwords, private file contents, or raw chat transcripts. "
-    "If both structured lines are needed, put TODO_JSON and MEMORY_JSON on separate final lines."
+    "If multiple structured lines are needed, put TODO_JSON, DONE_JSON, and MEMORY_JSON on separate final lines."
 )
 
 
@@ -136,11 +144,13 @@ class TaskItemWidget(QWidget):
         
     def _on_done(self):
         self.parent_bubble.todo_store.mark_done(int(self.task["id"]))
+        self.parent_bubble._forget_task_context(self.task)
         self.parent_bubble._append("Planner", f"Completed #{self.task['id']}: {self.task['title']}")
         self.parent_bubble._refresh_planner()
 
     def _on_delete(self):
         self.parent_bubble.todo_store.delete_task(int(self.task["id"]))
+        self.parent_bubble._forget_task_context(self.task)
         self.parent_bubble._append("Planner", f"Deleted #{self.task['id']}: {self.task['title']}")
         self.parent_bubble._refresh_planner()
         
@@ -151,6 +161,7 @@ class TaskItemWidget(QWidget):
         
     def _on_archive_delete(self):
         self.parent_bubble.todo_store.delete_task(int(self.task["id"]))
+        self.parent_bubble._forget_task_context(self.task)
         self.parent_bubble._append("Planner", f"Permanently deleted #{self.task['id']}: {self.task['title']}")
         self.parent_bubble._refresh_planner()
 
@@ -158,7 +169,7 @@ class TaskItemWidget(QWidget):
 class ChatBubble(QWidget):
     """Combined assistant chat, task planner, archive, and settings entry point."""
 
-    response_ready = pyqtSignal(str, object, object, str)
+    response_ready = pyqtSignal(str, object, object, object, str)
     closed = pyqtSignal()
 
     def __init__(
@@ -169,6 +180,7 @@ class ChatBubble(QWidget):
         window_tracker: WindowTracker | None = None,
         device_monitor: DeviceMonitor | None = None,
         memory_store: MemoryStore | None = None,
+        voice: MicrosoftVoice | None = None,
     ):
         super().__init__()
         self.llm_client = llm_client
@@ -177,6 +189,7 @@ class ChatBubble(QWidget):
         self.window_tracker = window_tracker
         self.device_monitor = device_monitor
         self.memory_store = memory_store
+        self.voice = voice
         self.pet_name = socket.gethostname() or os.environ.get("COMPUTERNAME", "Desktop Pet")
         self.history: list[dict[str, str]] = []
         self._transcript_entries: list[tuple[str, str]] = []
@@ -217,6 +230,20 @@ class ChatBubble(QWidget):
         title = QLabel(f" {self.pet_name}", self)
         title.setObjectName("panelTitle")
         header_layout.addWidget(title, 1)
+        self.minimize_button = QPushButton("\u2014", self)
+        self.minimize_button.setObjectName("iconButton")
+        self.minimize_button.setFixedSize(36, 36)
+        self.minimize_button.setToolTip("Minimize")
+        self.minimize_button.clicked.connect(self.showMinimized)
+        header_layout.addWidget(self.minimize_button)
+
+        self.fullscreen_button = QPushButton("\u25a1", self)
+        self.fullscreen_button.setObjectName("iconButton")
+        self.fullscreen_button.setFixedSize(36, 36)
+        self.fullscreen_button.setToolTip("Toggle Fullscreen")
+        self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
+        header_layout.addWidget(self.fullscreen_button)
+
         self.settings_button = QPushButton("\u2699", self)
         self.settings_button.setObjectName("iconButton")
         self.settings_button.setFixedSize(36, 36)
@@ -387,6 +414,12 @@ class ChatBubble(QWidget):
         visible = self.detail_toggle.isChecked()
         self.detail_panel.setVisible(visible)
         self.detail_toggle.setText("\u25b4" if visible else "\u25be")
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     def _apply_stylesheet(self) -> None:
         self.setStyleSheet("""
@@ -870,18 +903,20 @@ class ChatBubble(QWidget):
     ) -> None:
         """Call the model on a worker thread and emit a UI-thread signal."""
         reply = self.llm_client.chat(messages, provider=provider, device_snapshot=device_snapshot)
-        display, task, memory_payload = extract_structured_reply(reply)
-        self.response_ready.emit(display, task, memory_payload, user_text)
+        display, task, completion_payload, memory_payload = extract_structured_reply(reply)
+        self.response_ready.emit(display, task, completion_payload, memory_payload, user_text)
 
     def _receive_response(
         self,
         display: str,
         task: object,
+        completion_payload: object,
         memory_payload: object,
         user_text: str,
     ) -> None:
         """Render an assistant response and persist any extracted todo."""
         self._remove_last_thinking_line()
+        completed = self._complete_referenced_tasks(completion_payload)
         if task:
             task_id = self.todo_store.add_task(
                 task["title"],
@@ -895,6 +930,9 @@ class ChatBubble(QWidget):
                 f"{display}\n\nTodo saved #{task_id}: "
                 f"[{priority}] {task['title']}{due}"
             ).strip()
+            self._refresh_planner()
+        if completed:
+            display = f"{display}\n\n{completed}".strip()
             self._refresh_planner()
         self._remember_context(memory_payload)
         self._append("Pet", display or "Done.")
@@ -926,6 +964,8 @@ class ChatBubble(QWidget):
             f"Current local time: {datetime.now().astimezone().isoformat(timespec='seconds')}\n"
             f"Saved context:\n{memory_summary}\n"
             f"Open todos:\n{self.todo_store.open_tasks_summary()}\n"
+            f"Recently completed todos (historical only; do not ask about these as active work):\n"
+            f"{self.todo_store.recent_completed_summary()}\n"
             f"Work summary:\n{self.work_tracker.summary_text()}\n"
             f"Recent work pattern:\n{recent_work}\n"
             f"Device summary:\n{device_summary}"
@@ -941,7 +981,11 @@ class ChatBubble(QWidget):
         if self.memory_store is None:
             return "No saved long-term memory yet."
         try:
-            return self.memory_store.context_summary()
+            completed_titles = [
+                str(task.get("title", ""))
+                for task in self.todo_store.list_archived_tasks(20)
+            ]
+            return self.memory_store.context_summary(exclude_texts=completed_titles)
         except Exception as exc:  # pragma: no cover - defensive for tray app.
             print(f"Memory context unavailable: {exc}")
             return "Saved memory is temporarily unavailable."
@@ -960,6 +1004,37 @@ class ChatBubble(QWidget):
         except Exception as exc:  # pragma: no cover - defensive for tray app.
             print(f"Recent work summary unavailable: {exc}")
             return "Recent work pattern is temporarily unavailable."
+
+    def _complete_referenced_tasks(self, completion_payload: object) -> str:
+        completions = normalize_completion_payloads(completion_payload)
+        if not completions:
+            return ""
+        completed_tasks: list[dict] = []
+        for completion in completions:
+            matches = self.todo_store.mark_done_by_reference(
+                completion.get("task_id"),
+                completion.get("title", ""),
+                bool(completion.get("all_related", True)),
+            )
+            for task in matches:
+                if not any(int(task["id"]) == int(existing["id"]) for existing in completed_tasks):
+                    completed_tasks.append(task)
+                    self._forget_task_context(task)
+        if not completed_tasks:
+            return "I heard that it is done, but I could not match it to an open todo."
+        if len(completed_tasks) == 1:
+            task = completed_tasks[0]
+            return f"Marked done #{task['id']}: {task['title']}"
+        labels = ", ".join(f"#{task['id']}" for task in completed_tasks)
+        return f"Marked done {labels}."
+
+    def _forget_task_context(self, task: dict) -> None:
+        if self.memory_store is None:
+            return
+        try:
+            self.memory_store.archive_related_to(str(task.get("title", "")))
+        except Exception as exc:  # pragma: no cover - defensive for tray app.
+            print(f"Task memory cleanup failed: {exc}")
 
     def _device_snapshot(self) -> DeviceSnapshot | None:
         if self.device_monitor is None:
@@ -1022,6 +1097,15 @@ class ChatBubble(QWidget):
         self._transcript_entries.append((speaker, text))
         self._transcript_entries = self._transcript_entries[-80:]
         self._render_transcript()
+        self._speak_pet_message(speaker, text)
+
+    def _speak_pet_message(self, speaker: str, text: str) -> None:
+        """Speak real pet messages when voice output is enabled."""
+        if self.voice is None or speaker != "Pet":
+            return
+        if str(text or "").strip().startswith("Thinking"):
+            return
+        self.voice.speak_if_enabled(text)
 
     def _render_transcript(self) -> None:
         styles = """
@@ -1145,35 +1229,40 @@ class ChatBubble(QWidget):
             self._render_transcript()
 
 
-def extract_structured_reply(reply: str) -> tuple[str, dict | None, dict | None]:
-    """Split assistant text from optional TODO_JSON and MEMORY_JSON lines."""
+def extract_structured_reply(reply: str) -> tuple[str, dict | None, object | None, dict | None]:
+    """Split assistant text from optional TODO_JSON, DONE_JSON, and MEMORY_JSON lines."""
     lines = reply.splitlines()
     task = None
+    completion_payload = None
     memory_payload = None
     kept = []
     todo_pattern = re.compile(r"^TODO_JSON:\s*(.+)\s*$")
+    done_pattern = re.compile(r"^DONE_JSON:\s*(.+)\s*$")
     memory_pattern = re.compile(r"^MEMORY_JSON:\s*(.+)\s*$")
     for line in lines:
         stripped = line.strip()
         todo_match = todo_pattern.match(stripped)
+        done_match = done_pattern.match(stripped)
         memory_match = memory_pattern.match(stripped)
-        if not todo_match and not memory_match:
+        if not todo_match and not done_match and not memory_match:
             kept.append(line)
             continue
-        raw = (todo_match or memory_match).group(1).strip()
+        raw = (todo_match or done_match or memory_match).group(1).strip()
         candidate = parse_json_object(raw)
         if not isinstance(candidate, dict):
             continue
         if todo_match:
             task = normalize_task_payload(candidate)
+        elif done_match:
+            completion_payload = candidate
         else:
             memory_payload = candidate
-    return "\n".join(kept).strip(), task, memory_payload
+    return "\n".join(kept).strip(), task, completion_payload, memory_payload
 
 
 def extract_todo_json(reply: str) -> tuple[str, dict | None]:
     """Split assistant text from an optional strict `TODO_JSON` line."""
-    display, task, _ = extract_structured_reply(reply)
+    display, task, _, _ = extract_structured_reply(reply)
     return display, task
 
 
@@ -1196,3 +1285,43 @@ def normalize_task_payload(candidate: dict) -> dict | None:
         "priority": normalize_priority(candidate.get("priority")),
         "notes": str(candidate.get("notes") or "").strip()[:500],
     }
+
+
+def normalize_completion_payloads(payload: object) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    raw_items = payload.get("tasks") or payload.get("completed") or payload.get("items")
+    if raw_items is None:
+        raw_items = [payload]
+    elif isinstance(raw_items, dict):
+        raw_items = [raw_items]
+    if not isinstance(raw_items, list):
+        return []
+
+    completions = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        task_id = parse_optional_int(item.get("task_id") or item.get("id"))
+        title = str(item.get("title") or item.get("task") or "").strip()
+        if task_id is None and not title:
+            continue
+        completions.append(
+            {
+                "task_id": task_id,
+                "title": title[:240],
+                "all_related": bool(item.get("all_related", True)),
+            }
+        )
+    return completions
+
+
+def parse_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if str(value).strip().lower() in {"", "null", "none"}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

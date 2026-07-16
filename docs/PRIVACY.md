@@ -25,6 +25,7 @@ Desktop Pet is designed to be local-first and conservative with user context.
 When the user chats or a proactive nudge runs, the model prompt may include:
 
 - Open todo summaries.
+- Recent completed todo summaries, treated as historical context.
 - Saved memory summaries and the compact rolling conversation summary.
 - Counts for open, due-today, and overdue tasks.
 - Work summary text such as active time and current coarse app bucket.

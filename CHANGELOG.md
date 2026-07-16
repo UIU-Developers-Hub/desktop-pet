@@ -4,6 +4,8 @@ All notable changes should be documented here.
 
 ## Unreleased
 
+- Added natural-language todo completion and related-memory cleanup so finished
+  work does not keep resurfacing after reopening the pet.
 - Added SQLite-backed summarized assistant memory so chat can preserve user
   preferences, project context, and work style across restarts without storing
   raw transcripts.

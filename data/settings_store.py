@@ -17,7 +17,7 @@ PROVIDERS = {"auto", "local", "cloud"}
 
 @dataclass
 class AppSettings:
-    """User-editable LLM routing settings.
+    """User-editable LLM routing and pet voice settings.
 
     Instances are normalized before use so the rest of the app can assume valid
     provider names, non-empty URLs, and bounded timeouts.
@@ -31,6 +31,7 @@ class AppSettings:
     chat_provider: str = config.CHAT_PROVIDER
     cloud_fallback_enabled: bool = config.OLLAMA_CLOUD_FALLBACK
     timeout_seconds: int = config.LLM_TIMEOUT_SECONDS
+    voice_enabled: bool = False
 
     def normalized(self) -> "AppSettings":
         """Clean fields in place and return `self` for compact call chains."""
@@ -41,6 +42,7 @@ class AppSettings:
         self.cloud_api_key = str(self.cloud_api_key or "").strip()
         self.chat_provider = normalize_provider(self.chat_provider)
         self.cloud_fallback_enabled = bool(self.cloud_fallback_enabled)
+        self.voice_enabled = bool(self.voice_enabled)
         try:
             self.timeout_seconds = max(2, min(120, int(self.timeout_seconds)))
         except (TypeError, ValueError):

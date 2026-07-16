@@ -78,10 +78,11 @@ The default provider is `auto`:
 - If local load is high and cloud fallback is unavailable, show a friendly warning
   instead of starting a local model call.
 
-Chat prompts include current todos, current work state, recent coarse work
-patterns, and saved summarized memory. Assistant replies may include hidden
-`TODO_JSON` and `MEMORY_JSON` lines; the UI strips those lines before rendering
-and persists the structured data locally.
+Chat prompts include current todos, recent completed todos as historical context,
+current work state, recent coarse work patterns, and saved summarized memory.
+Assistant replies may include hidden `TODO_JSON`, `DONE_JSON`, and `MEMORY_JSON`
+lines; the UI strips those lines before rendering and persists the structured
+data locally.
 
 ## Asset loading
 

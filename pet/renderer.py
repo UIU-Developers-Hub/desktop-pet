@@ -47,9 +47,20 @@ STATE_COLORS = {
 MASK_ALPHA_THRESHOLD = 8
 MASK_PADDING_PIXELS = 1
 IDLE_USER_BLINK_FRAME_INDEX = 2
-IDLE_APP_BLINK_FRAME_INDEX = 4
 IDLE_BLINK_MIN_SECONDS = 4.0
 IDLE_BLINK_MAX_SECONDS = 9.0
+IDLE_APP_POSE_FRAME_INDEX = 1
+IDLE_APP_PUPIL_OFFSETS = (
+    (0, 0),
+    (1, 0),
+    (0, 0),
+    (-1, 0),
+    (0, 0),
+)
+IDLE_APP_PUPIL_REGIONS = (
+    QRect(22, 45, 10, 16),
+    QRect(55, 58, 11, 15),
+)
 
 
 class PetRenderer(QWidget):
@@ -80,6 +91,8 @@ class PetRenderer(QWidget):
         self._look_target_x: int | None = None
         self._idle_attention = "user"
         self._idle_blinking = False
+        self._idle_app_pupil_index = 0
+        self._idle_app_pupil_frames: list[QPixmap] = []
         self._rng = random.Random()
         self._next_idle_blink_at = 0.0
 
@@ -140,6 +153,7 @@ class PetRenderer(QWidget):
         self._load_local_sprite_frames()
         self._load_cat_pack_frames()
         self._load_fallback_frames()
+        self._prepare_idle_app_pupil_frames()
 
     def _load_local_sprite_frames(self) -> None:
         loaded_any = False
@@ -211,6 +225,9 @@ class PetRenderer(QWidget):
         if attention == self._idle_attention:
             return
         self._idle_attention = attention
+        if attention == "app":
+            self._idle_blinking = False
+            self._idle_app_pupil_index = 0
         if self.state == "idle" and not self._idle_blinking:
             self.frame_index = self._idle_pose_frame()
             self._update_mask()
@@ -245,6 +262,14 @@ class PetRenderer(QWidget):
         self.update()
 
     def _next_idle_frame(self, frames: list[QPixmap]) -> None:
+        if self._idle_attention == "app":
+            self.frame_index = self._idle_pose_frame()
+            if self._idle_app_pupil_frames:
+                self._idle_app_pupil_index = (
+                    self._idle_app_pupil_index + 1
+                ) % len(self._idle_app_pupil_frames)
+            return
+
         blink_frame_index = self._idle_blink_frame_index(frames)
         if blink_frame_index is None:
             self.frame_index = (self.frame_index + 1) % len(frames)
@@ -262,8 +287,6 @@ class PetRenderer(QWidget):
             self.frame_index = self._idle_pose_frame()
 
     def _idle_blink_frame_index(self, frames: list[QPixmap]) -> int | None:
-        if self._idle_attention == "app" and len(frames) > IDLE_APP_BLINK_FRAME_INDEX:
-            return IDLE_APP_BLINK_FRAME_INDEX
         if len(frames) > IDLE_USER_BLINK_FRAME_INDEX:
             return IDLE_USER_BLINK_FRAME_INDEX
         return None
@@ -272,7 +295,11 @@ class PetRenderer(QWidget):
         frames = self._frames.get("idle", [])
         if not frames:
             return 0
-        preferred = 1 if self._idle_attention == "app" and len(frames) > 1 else 0
+        preferred = (
+            IDLE_APP_POSE_FRAME_INDEX
+            if self._idle_attention == "app" and len(frames) > IDLE_APP_POSE_FRAME_INDEX
+            else 0
+        )
         return min(preferred, len(frames) - 1)
 
     def _schedule_next_idle_blink(self) -> None:
@@ -286,10 +313,60 @@ class PetRenderer(QWidget):
         frames = self._frames.get(self.state) or self._frames.get("idle", [])
         if not frames:
             return None
-        frame = frames[self.frame_index % len(frames)]
+        if (
+            self.state == "idle"
+            and self._idle_attention == "app"
+            and self.frame_index == IDLE_APP_POSE_FRAME_INDEX
+            and self._idle_app_pupil_frames
+        ):
+            frame = self._idle_app_pupil_frames[
+                self._idle_app_pupil_index % len(self._idle_app_pupil_frames)
+            ]
+        else:
+            frame = frames[self.frame_index % len(frames)]
         if self._is_flipped:
             frame = frame.transformed(QTransform().scale(-1, 1))
         return frame
+
+    def _prepare_idle_app_pupil_frames(self) -> None:
+        self._idle_app_pupil_frames = []
+        frames = self._frames.get("idle", [])
+        if len(frames) <= IDLE_APP_POSE_FRAME_INDEX:
+            return
+
+        source = frames[IDLE_APP_POSE_FRAME_INDEX].toImage().convertToFormat(
+            QImage.Format.Format_ARGB32
+        )
+        for dx, dy in IDLE_APP_PUPIL_OFFSETS:
+            self._idle_app_pupil_frames.append(
+                QPixmap.fromImage(self._shift_app_pupil_pixels(source, dx, dy))
+            )
+
+    def _shift_app_pupil_pixels(self, source: QImage, dx: int, dy: int) -> QImage:
+        shifted = source.copy()
+        for rect in IDLE_APP_PUPIL_REGIONS:
+            pixels = []
+            for y in range(rect.top(), rect.bottom() + 1):
+                for x in range(rect.left(), rect.right() + 1):
+                    color = source.pixelColor(x, y)
+                    if self._is_app_pupil_pixel(color):
+                        pixels.append((x, y, color))
+
+            for x, y, color in pixels:
+                target_x = x + dx
+                target_y = y + dy
+                if rect.contains(target_x, target_y):
+                    shifted.setPixelColor(target_x, target_y, color)
+        return shifted
+
+    @staticmethod
+    def _is_app_pupil_pixel(color: QColor) -> bool:
+        return (
+            color.alpha() > 150
+            and color.red() < 45
+            and color.green() < 58
+            and color.blue() < 55
+        )
 
     def _update_mask(self) -> None:
         """Rebuild the window mask from the visible pixels of the frame."""

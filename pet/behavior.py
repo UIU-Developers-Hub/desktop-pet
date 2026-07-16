@@ -20,6 +20,7 @@ CHECKIN_PROMPT = (
     "then paused. Write exactly one brief, warm check-in question under 130 "
     "characters. Use todo/work context when helpful. Ask whether they completed "
     "the current task, need the next step, are tired, or want a small break. "
+    "Do not ask about completed or archived todos as active work. "
     "Return only the question. No preamble, no bullets, no emoji."
 )
 
@@ -240,6 +241,7 @@ class BehaviorEngine(QObject):
         context = {
             "local_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "open_todos": self.chat_bubble.todo_store.open_tasks_summary(6),
+            "recently_completed_todos": self.chat_bubble.todo_store.recent_completed_summary(6),
             "todo_counts": self.chat_bubble.todo_store.task_counts(),
             "work_summary": self.chat_bubble.work_tracker.summary_text(),
             "device_summary": (

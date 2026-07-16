@@ -21,6 +21,7 @@ from pet.input_activity import InputActivityMonitor
 from pet.mini_bubble import MiniBubble
 from pet.renderer import PetRenderer
 from pet.smart_nudge import SmartNudgeEngine
+from pet.voice import MicrosoftVoice
 from pet.window_tracker import WindowTracker
 from pet.work_tracker import WorkTracker
 
@@ -68,6 +69,7 @@ def main() -> int:
     memory_store = MemoryStore(config.DB_PATH)
     settings_store = SettingsStore(config.SETTINGS_PATH)
     llm_client = OllamaClient(settings_store)
+    voice = MicrosoftVoice(settings_store)
     window_tracker = WindowTracker()
     work_tracker = WorkTracker(work_store)
     device_monitor = DeviceMonitor()
@@ -81,6 +83,7 @@ def main() -> int:
         window_tracker,
         device_monitor,
         memory_store,
+        voice,
     )
     mini_bubble = MiniBubble()
     behavior = BehaviorEngine(renderer, window_tracker, chat_bubble, input_monitor, mini_bubble)
@@ -165,6 +168,7 @@ def main() -> int:
         smart_nudge.stop()
         scheduler.stop()
         behavior.stop()
+        voice.stop()
         input_monitor.stop()
         work_tracker.stop()
 

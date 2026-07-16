@@ -1,39 +1,73 @@
 # Desktop Pet
 
 Desktop Pet is a Windows desktop companion built with Python, PyQt6, SQLite, and
-Ollama. It sits on the desktop as a transparent always-on-top sprite, opens a
-task/chat panel on click or hotkey, tracks coarse work sessions locally, and can
-offer gentle proactive nudges when the user has due tasks, a long active streak,
-or high local device load.
+Ollama. It lives on the desktop as a transparent always-on-top sprite, opens a
+tabbed chat/task panel on click or hotkey, tracks coarse work sessions locally,
+and can offer gentle proactive nudges when the user has due tasks, a long active
+streak, a focus pause, a distraction pattern, or high local device load.
 
 The project is small enough to clone, run, inspect, and contribute to without a
 large framework. It is also privacy-conscious: the keyboard hook keeps timing
-metadata only, and foreground-window tracking stores coarse app buckets instead
-of raw titles.
+metadata only, foreground-window tracking stores coarse app buckets instead of
+raw titles, and long-term assistant context is stored as summaries rather than
+raw transcripts.
 
-## Features
+## Feature List
 
-- Transparent draggable desktop pet sprite with idle, talking, reaction, and
-  sleep/rest animation states.
+### Desktop Companion
+
+- Transparent, always-on-top pet sprite with alpha masking so transparent pixels
+  do not steal clicks.
+- Draggable sprite that snaps back to the desktop ground line when released.
+- Idle, talking, and rest visuals, with renderer support for reaction/action
+  sprite strips from `assets/sprites/`, CatPackFree, or generated placeholders.
+- Idle attention behavior that can face the user or glance toward the active app
+  window using coarse window geometry.
+- Lightweight proactive mini-bubble that opens the full panel when clicked.
 - System tray app with quick access to chat, work-status questions, and quit.
 - Global hotkey support, defaulting to `Ctrl+Alt+Space`.
+
+### Chat And Planning
+
+- Tabbed panel for Chat, Tasks, and Archive, with minimize, fullscreen, and
+  Settings controls.
+- Chat quick actions for day planning, next-step selection, and work-status
+  review.
+- Markdown rendering in assistant replies, including fenced code blocks and
+  links.
+- Natural-language todo creation and completion through structured model replies.
 - Task planner with quick add, optional due dates, priority, notes, filters,
   completion, restore, delete, and archive views.
-- Local SQLite storage for tasks and work sessions.
+- SQLite storage for open tasks, completed tasks, priorities, notes, due dates,
+  and timestamps.
+- Persistent summarized memory for user preferences, project plans, working
+  style, and compact conversation rollups, so chat context survives restarts
+  without storing raw transcripts.
+
+### Focus And Nudges
+
 - Work tracking based on Windows idle time and coarse foreground app buckets.
-- Persistent summarized memory for user preferences, project plans, and working
-  style, so chat context survives restarts without storing raw transcripts.
-- Focus-sleep mode during intense typing, followed by a short check-in after the
-  user pauses.
-- Proactive nudges for due tasks, long active streaks, break returns,
-  distractions, overdue tasks, praise, jokes, and local resource pressure.
+- Recent work-pattern summaries for prompts and planning.
+- Focus-sleep mode during intense typing, followed by a short privacy-safe
+  check-in after the user pauses.
+- Scheduled nudges for due tasks, long active streaks, and return-from-break
+  moments.
+- Smart proactive nudges for distractions, overdue tasks, productive streaks,
+  brief jokes, and local resource pressure.
+- Deterministic fallback nudge text when the model is unavailable or output
+  cannot be parsed.
+
+### Models, Settings, And Voice
+
 - Ollama local chat support, Ollama Cloud support, and automatic cloud fallback
   when local CPU/RAM is high and cloud credentials are configured.
+- Settings dialog for local/cloud hosts, model names, model detection, default
+  chat route, request timeout, cloud fallback, API key storage, and voice output.
 - Device telemetry gate that avoids starting local model calls when the machine
   is already busy.
-- Runtime placeholder sprites when image assets are missing, so the app can
-  still start.
-- Markdown rendering in assistant replies.
+- Optional Microsoft SAPI voice output for pet replies, using the default
+  Windows voice.
+- Friendly offline, timeout, model-missing, and credential-error messages.
 
 ## Requirements
 
@@ -42,6 +76,7 @@ of raw titles.
 - Ollama for local model calls.
 - A pulled local model, by default `nemotron-3-nano:4b`.
 - Optional: an Ollama Cloud API key for cloud routing/fallback.
+- Optional: the default Windows voice for spoken pet replies.
 
 The app uses Windows-specific dependencies (`pywin32`, `keyboard`, and Win32 idle
 APIs), so Linux/macOS are not supported runtime targets.
@@ -83,7 +118,25 @@ messages for model-backed features.
 - Use the Chat tab to ask planning questions or create todos in natural
   language.
 - Open Settings from the panel to choose local/cloud routing, set hosts/models,
-  detect models, and save an Ollama Cloud API key.
+  detect models, save an Ollama Cloud API key, set request timeout, enable cloud
+  fallback, and turn voice replies on or off.
+- Click a proactive mini-bubble to open the full panel with the same message in
+  context.
+
+## Start With Windows
+
+After creating `.venv` and installing dependencies, run:
+
+```powershell
+.\enable_startup.bat
+```
+
+The script creates a per-user Startup shortcut that launches `main.py` with
+`.venv\Scripts\pythonw.exe`. To remove the shortcut, run:
+
+```powershell
+.\disable_startup.bat
+```
 
 ## Configuration
 
@@ -100,6 +153,7 @@ OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "nemotron-3-nano:4b"
 OLLAMA_CLOUD_URL = "https://ollama.com"
 OLLAMA_CLOUD_MODEL = "gpt-oss:120b"
+OLLAMA_CLOUD_FALLBACK = True
 CHAT_PROVIDER = "auto"
 LLM_TIMEOUT_SECONDS = 30
 LLM_DEVICE_GATING = True
@@ -107,7 +161,9 @@ LLM_DEVICE_GATING = True
 
 Smart nudge and work tracking thresholds are also in `config.py`, including
 typing intensity, wake-check-in delays, idle thresholds, break intervals, CPU/RAM
-limits, and proactive cooldowns.
+limits, proactive cooldowns, and memory limits. User-edited values for routing,
+model names, timeout, cloud fallback, API key, and voice output are stored in
+`data/settings.json`.
 
 ## Data and Privacy
 
@@ -116,7 +172,7 @@ Runtime data is created under `data/`:
 - `data/pet.db`: tasks, work sessions, and summarized assistant memory such as
   durable preferences, project context, and rolling conversation rollups.
 - `data/settings.json`: local/cloud model routing settings and optional cloud API
-  key.
+  key, plus the voice-output preference.
 
 The app does not store raw chat transcripts, keyboard-hook typed text, raw window
 titles, screenshots, or screen contents. See [docs/PRIVACY.md](docs/PRIVACY.md)
@@ -128,6 +184,8 @@ for the privacy boundary that contributors should preserve.
 desktop-pet/
   main.py                  # Qt application composition and tray wiring
   config.py                # Defaults for paths, timings, models, and thresholds
+  enable_startup.bat       # Register a per-user Windows Startup shortcut
+  disable_startup.bat      # Remove the Startup shortcut
   ai/
     llm_client.py          # Ollama local/cloud client and routing
   data/
@@ -146,13 +204,17 @@ desktop-pet/
     renderer.py            # Sprite rendering, masking, dragging, and animation
     settings_dialog.py     # LLM routing/settings dialog
     smart_nudge.py         # Smart nudge selection and message generation
+    voice.py               # Optional Microsoft SAPI voice output
     window_tracker.py      # Foreground window geometry helpers
     work_tracker.py        # Idle/work-session tracker
   assets/
+    pet_icon.png           # Tray/header/startup shortcut icon
     sprites/               # Runtime sprite strips
+    CatPackFree/           # Fallback sprite pack
   docs/
     ARCHITECTURE.md
     PRIVACY.md
+    USER_CONTEXT.md
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for runtime flow, threading,

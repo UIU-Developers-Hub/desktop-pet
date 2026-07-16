@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from contextlib import closing
@@ -12,6 +13,36 @@ import config
 
 
 PRIORITIES = {"high", "normal", "low"}
+TASK_MATCH_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "do",
+    "done",
+    "for",
+    "from",
+    "i",
+    "in",
+    "is",
+    "it",
+    "make",
+    "my",
+    "of",
+    "on",
+    "or",
+    "plan",
+    "schedule",
+    "task",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+}
 
 
 class TodoStore:
@@ -110,6 +141,71 @@ class TodoStore:
                         """,
                         (completed_at, completed_at, task_id),
                     )
+
+    def mark_done_by_reference(
+        self,
+        task_id: int | None = None,
+        title: str = "",
+        all_related: bool = True,
+    ) -> list[dict]:
+        """Mark open tasks done by id and/or fuzzy title reference."""
+        title = str(title or "").strip()
+        matches = self.find_open_task_matches(task_id, title)
+        if not all_related and matches:
+            matches = matches[:1]
+        if not matches:
+            return []
+
+        completed_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        ids = [int(task["id"]) for task in matches]
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                with conn:
+                    conn.execute(
+                        f"""
+                        UPDATE tasks
+                        SET done = 1, completed_at = ?, updated_at = ?
+                        WHERE done = 0 AND id IN ({placeholders})
+                        """,
+                        (completed_at, completed_at, *ids),
+                    )
+        return matches
+
+    def find_open_task_matches(
+        self,
+        task_id: int | None = None,
+        title: str = "",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return open tasks matching an id or fuzzy title reference."""
+        title = str(title or "").strip()
+        tasks = self.list_open_tasks(limit)
+        matches: list[tuple[float, dict]] = []
+
+        if task_id is not None:
+            for task in tasks:
+                if int(task["id"]) == int(task_id):
+                    matches.append((2.0, task))
+                    break
+
+        if title:
+            for task in tasks:
+                if any(int(task["id"]) == int(existing["id"]) for _, existing in matches):
+                    continue
+                score = task_match_score(title, str(task.get("title", "")))
+                if score >= 0.55:
+                    matches.append((score, task))
+
+        matches.sort(
+            key=lambda item: (
+                -item[0],
+                item[1].get("due_at") is None,
+                str(item[1].get("due_at") or ""),
+                int(item[1]["id"]),
+            )
+        )
+        return [task for _, task in matches]
 
     def delete_task(self, task_id: int) -> None:
         with self._lock:
@@ -236,6 +332,17 @@ class TodoStore:
             lines.append(f"- #{task['id']} [{priority}]: {task['title']}{due}{notes}")
         return "\n".join(lines)
 
+    def recent_completed_summary(self, limit: int = 8) -> str:
+        """Return recent completions as historical context for prompts."""
+        tasks = self.list_archived_tasks(limit)
+        if not tasks:
+            return "No recently completed todos."
+        lines = []
+        for task in tasks:
+            completed = f" completed {task['completed_at']}" if task.get("completed_at") else ""
+            lines.append(f"- #{task['id']}: {task['title']}{completed}")
+        return "\n".join(lines)
+
 
 def normalize_due_at(value: str | None) -> str | None:
     """Normalize ISO-like date/time text to a local timezone ISO timestamp."""
@@ -267,3 +374,37 @@ def normalize_priority(value: str | None) -> str:
     if text not in PRIORITIES:
         return "normal"
     return text
+
+
+def task_match_score(reference: str, title: str) -> float:
+    """Return a rough 0..1 similarity score for user completion text."""
+    reference_key = normalized_text(reference)
+    title_key = normalized_text(title)
+    if not reference_key or not title_key:
+        return 0.0
+    if reference_key == title_key or reference_key in title_key or title_key in reference_key:
+        return 1.0
+
+    reference_tokens = meaningful_tokens(reference_key)
+    title_tokens = meaningful_tokens(title_key)
+    if not reference_tokens or not title_tokens:
+        return 0.0
+    shared = reference_tokens & title_tokens
+    if not shared:
+        return 0.0
+    score = len(shared) / max(1, min(len(reference_tokens), len(title_tokens)))
+    if len(shared) == 1 and len(next(iter(shared))) < 4:
+        return 0.0
+    return score
+
+
+def normalized_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def meaningful_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in normalized_text(value).split()
+        if len(token) >= 2 and token not in TASK_MATCH_STOP_WORDS
+    }

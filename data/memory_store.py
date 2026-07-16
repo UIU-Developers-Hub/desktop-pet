@@ -17,6 +17,33 @@ MEMORY_KINDS = {"preference", "project", "work_style", "profile", "instruction",
 MAX_MEMORY_CHARS = 240
 MAX_ROLLUP_CHARS = 1200
 SECRET_HINT_RE = re.compile(r"(?i)\b(api[_ -]?key|access[_ -]?token|password|secret|bearer)\b")
+MEMORY_MATCH_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "completed",
+    "done",
+    "finished",
+    "for",
+    "from",
+    "i",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "task",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+}
 
 
 @dataclass(frozen=True)
@@ -213,9 +240,14 @@ class MemoryStore:
                 saved += 1
         return saved
 
-    def context_summary(self, limit: int = config.MEMORY_CONTEXT_LIMIT) -> str:
+    def context_summary(
+        self,
+        limit: int = config.MEMORY_CONTEXT_LIMIT,
+        exclude_texts: list[str] | None = None,
+    ) -> str:
         """Return compact saved context for an LLM prompt."""
         limit = max(1, min(30, int(limit)))
+        exclude_texts = [str(text) for text in (exclude_texts or []) if str(text or "").strip()]
         with self._lock:
             with closing(self._connect()) as conn:
                 rollup = conn.execute(
@@ -233,12 +265,69 @@ class MemoryStore:
                 ).fetchall()
 
         parts = []
-        if rollup and rollup["summary"]:
+        if rollup and rollup["summary"] and not any_text_related(str(rollup["summary"]), exclude_texts):
             parts.append(f"Conversation rollup:\n{rollup['summary']}")
         if rows:
-            lines = [f"- [{row['kind']}] {row['summary']}" for row in rows]
-            parts.append("Durable memories:\n" + "\n".join(lines))
+            lines = [
+                f"- [{row['kind']}] {row['summary']}"
+                for row in rows
+                if not any_text_related(str(row["summary"]), exclude_texts)
+            ]
+            if lines:
+                parts.append("Durable memories:\n" + "\n".join(lines))
         return "\n\n".join(parts) or "No saved long-term memory yet."
+
+    def archive_related_to(self, text: str) -> int:
+        """Archive memory rows and clear rollups related to completed work."""
+        text = str(text or "").strip()
+        if not text:
+            return 0
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        archived = 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                with conn:
+                    rows = conn.execute(
+                        """
+                        SELECT id, summary
+                        FROM memory_items
+                        WHERE archived = 0
+                        """
+                    ).fetchall()
+                    ids = [
+                        int(row["id"])
+                        for row in rows
+                        if text_related(str(row["summary"]), text)
+                    ]
+                    if ids:
+                        placeholders = ",".join("?" for _ in ids)
+                        conn.execute(
+                            f"""
+                            UPDATE memory_items
+                            SET archived = 1, updated_at = ?
+                            WHERE id IN ({placeholders})
+                            """,
+                            (now, *ids),
+                        )
+                        archived += len(ids)
+
+                    rollup = conn.execute(
+                        "SELECT summary FROM conversation_rollups WHERE id = 1"
+                    ).fetchone()
+                    if rollup and text_related(str(rollup["summary"]), text):
+                        conn.execute(
+                            """
+                            UPDATE conversation_rollups
+                            SET summary = ?, updated_at = ?
+                            WHERE id = 1
+                            """,
+                            (
+                                "Previous rolling context was cleared because related todo work is complete.",
+                                now,
+                            ),
+                        )
+                        archived += 1
+        return archived
 
     def list_memories(self, limit: int = 50) -> list[MemoryItem]:
         """Return active memories for debugging or future UI surfaces."""
@@ -316,3 +405,37 @@ def normalized_key(summary: str) -> str:
 
 def looks_sensitive(summary: str) -> bool:
     return bool(SECRET_HINT_RE.search(summary))
+
+
+def any_text_related(summary: str, texts: list[str]) -> bool:
+    return any(text_related(summary, text) for text in texts)
+
+
+def text_related(left: str, right: str) -> bool:
+    left_key = normalized_text(left)
+    right_key = normalized_text(right)
+    if not left_key or not right_key:
+        return False
+    if left_key in right_key or right_key in left_key:
+        return True
+    left_tokens = meaningful_tokens(left_key)
+    right_tokens = meaningful_tokens(right_key)
+    if not left_tokens or not right_tokens:
+        return False
+    shared = left_tokens & right_tokens
+    if not shared:
+        return False
+    score = len(shared) / max(1, min(len(left_tokens), len(right_tokens)))
+    return score >= 0.55 and (len(shared) > 1 or len(next(iter(shared))) >= 4)
+
+
+def normalized_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def meaningful_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in normalized_text(value).split()
+        if len(token) >= 2 and token not in MEMORY_MATCH_STOP_WORDS
+    }
