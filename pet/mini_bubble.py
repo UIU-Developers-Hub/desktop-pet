@@ -14,6 +14,9 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
+import html
+import markdown
+
 import config
 
 # Layout constants
@@ -59,7 +62,7 @@ class MiniBubble(QWidget):
         # --- internal label for text ---
         self._label = QLabel(self)
         self._label.setWordWrap(True)
-        self._label.setTextFormat(Qt.TextFormat.PlainText)
+        self._label.setTextFormat(Qt.TextFormat.RichText)
         self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         # The maximum width is set dynamically in show_message based on screen size
         self._label.setFont(self._make_font())
@@ -104,7 +107,13 @@ class MiniBubble(QWidget):
         if len(message) > _MAX_MESSAGE_LEN:
             message = message[: _MAX_MESSAGE_LEN - 1].rstrip() + "…"
         self._message = message
-        self._label.setText(f"🐉 {message}")
+        
+        try:
+            md_html = markdown.markdown(message, extensions=['fenced_code', 'nl2br', 'sane_lists', 'tables'])
+        except Exception:
+            md_html = html.escape(message).replace("\n", "<br>")
+            
+        self._label.setText(f"🐉 {md_html}")
 
         # Resize to fit content
         self._label.adjustSize()

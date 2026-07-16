@@ -1154,6 +1154,9 @@ class ChatBubble(QWidget):
             }
             a { color: #50d890; text-decoration: none; border-bottom: 1px solid #50d890; }
             .user-link { color: #ffffff; border-bottom: 1px solid #ffffff; }
+            table { border-collapse: collapse; margin: 8px 0; }
+            th, td { border: 1px solid rgba(255,255,255,0.2); padding: 4px 8px; }
+            th { background-color: rgba(0,0,0,0.2); font-weight: 600; }
         </style>
         """
         blocks = []
@@ -1177,7 +1180,7 @@ class ChatBubble(QWidget):
             
             # Parse markdown
             try:
-                md_html = markdown.markdown(text, extensions=['fenced_code', 'nl2br', 'sane_lists'])
+                md_html = markdown.markdown(text, extensions=['fenced_code', 'nl2br', 'sane_lists', 'tables'])
                 if is_user:
                     md_html = md_html.replace('<a href=', '<a class="user-link" href=')
             except Exception:
